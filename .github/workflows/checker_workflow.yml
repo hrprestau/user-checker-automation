@@ -1,27 +1,32 @@
 name: User Checker Automation
 
-# 1. QUANDO EXECUTAR
 on:
-  # Agendamento: Executa o workflow a cada 4 horas (ex: 00:00, 04:00, 08:00, etc. UTC)
+  # Roda a cada 4 horas (0, 4, 8, 12, 16, 20 horas UTC)
   schedule:
-    - cron: '0 */4 * * *' 
+    - cron: '0 */4 * * *'
   
-  # Permite execução manual através da interface do GitHub (o botão "Run workflow")
+  # Permite execução manual
   workflow_dispatch:
 
-# 2. O QUE FAZER
 jobs:
   run-checker:
-    # Define o ambiente de execução
     runs-on: ubuntu-latest
 
-    # Permissões necessárias para que o GitHub Action possa criar um Issue
     permissions:
       issues: write
+      
+    # --- NOVO: INJEÇÃO DOS SECRETS ---
+    # Estes segredos serão acessíveis pelo script Python como variáveis de ambiente
+    env:
+      HABBO_USER: ${{ secrets.HABBO_USER }}
+      HABBO_PASSWORD: ${{ secrets.HABBO_PASSWORD }}
+      VERCEL_USER: ${{ secrets.VERCEL_USER }}
+      VERCEL_PASSWORD: ${{ secrets.VERCEL_PASSWORD }}
+    # --- FIM DA SEÇÃO ENV ---
 
     steps:
-      # Passo 1: Clona o código do repositório
-      - name: Checkout code
+      # Passo 1: Faz o checkout do código do repositório
+      - name: Checkout repository code
         uses: actions/checkout@v4
 
       # Passo 2: Configura o ambiente Python
@@ -30,33 +35,40 @@ jobs:
         with:
           python-version: '3.x'
 
-      # Passo 3: Instala as dependências (requests e beautifulsoup4)
+      # Passo 3: Instala dependências (incluindo Selenium e Requests)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # Instala dependências do requirements.txt
           pip install -r requirements.txt
           
-      # Passo 4: Executa o script Python e captura sua saída (a mensagem de erro/diferença)
+      # Passo 4: Executa o script Python e captura a saída (codificada em base64 para segurança)
       - name: Run checker script and get output
         id: runscript
         run: |
-          OUTPUT=$(python checker.py)
-          echo "script_output=$OUTPUT" >> $GITHUB_OUTPUT
-        # Permite que este passo continue mesmo se o Python retornar um erro (para que o Issue seja criado)
-        continue-on-error: true
+          # Executa o script e armazena a saída bruta (que pode ter quebras de linha)
+          RAW_OUTPUT=$(python checker.py)
+          
+          # Codifica a saída em base64 e a define como variável de saída para o próximo passo
+          ENCODED_OUTPUT=$(echo -n "$RAW_OUTPUT" | base64 -w 0)
+          echo "script_output=$ENCODED_OUTPUT" >> $GITHUB_OUTPUT
+        continue-on-error: true # Permite que o workflow continue mesmo se houver erros de runtime no Python
 
-      # Passo 5: Cria um Issue SE a saída do script Python NÃO estiver vazia
+      # Passo 5: Cria um Issue SE o script Python retornar uma mensagem (saída não vazia)
       - name: Create Issue on Difference Found
+        # Verifica se o output codificado NÃO está vazio (se o script printou a notificação)
         if: steps.runscript.outputs.script_output != ''
         uses: actions/github-script@v7
         with:
           script: |
-            const scriptOutput = "${{ steps.runscript.outputs.script_output }}";
+            // Decodifica a saída de base64 de volta para texto para usá-la no corpo do Issue
+            const scriptOutputBase64 = "${{ steps.runscript.outputs.script_output }}";
+            const scriptOutput = Buffer.from(scriptOutputBase64, 'base64').toString('utf8');
             
             github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: 'DIFERENÇA ENCONTRADA: Revisar status do usuário!',
+              title: 'NOVATOS DETECTADOS: Verificar e Cadastrar Funcionários',
               body: scriptOutput,
-              labels: ['bug', 'automatic-check']
+              labels: ['bug', 'automatic-check', 'prioridade-alta']
             })

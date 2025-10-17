@@ -1,74 +1,149 @@
 import requests
 from bs4 import BeautifulSoup
 import sys
+import os
 from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+import time
 
-# --- CONFIGURAÇÕES ---
-# URL da página que você deseja verificar
-TARGET_URL = "https://habborp.city/corporacao/5"  # Substitua pela URL real (ex: 'https://site.com/user/hrprestau')
+# --- CONFIGURAÇÕES E CREDENCIAIS ---
+URL_HABBO = "https://habborp.city/corporacao/5"
+URL_DASHBOARD_LOGIN = "https://funcionarios-mu.vercel.app/admin" # Geralmente a URL base
+URL_DASHBOARD_DATA = "https://funcionarios-mu.vercel.app/admin/dashboard"
 
-# A string (texto) que indica que o usuário ESTÁ inativo/banido ou ausente.
-# Ajuste este texto conforme o site que você está monitorando.
-STRING_DE_ERRO = "Usuário não cadastrado"
-# Exemplo de outras strings: "User not found", "Conta Suspensa", "Banned"
+# Credenciais (Puxadas dos GitHub Secrets)
+HABBO_USER = os.environ.get('HABBO_USER')
+HABBO_PASSWORD = os.environ.get('HABBO_PASSWORD')
+VERCEL_USER = os.environ.get('VERCEL_USER')
+VERCEL_PASSWORD = os.environ.get('VERCEL_PASSWORD')
 
-# O nome ou ID do usuário que você está verificando (para o relatório)
-USER_ID = "hrprestau"
+# --- FUNÇÃO DE CRIAÇÃO DO DRIVER ---
+def setup_driver():
+    """Configura e retorna o driver do Chrome em modo headless."""
+    options = webdriver.ChromeOptions()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=options)
 
-# --- FUNÇÃO PRINCIPAL DE VERIFICAÇÃO ---
-def check_user_status():
-    """
-    Faz o web scraping, verifica o status e imprime uma mensagem se encontrar uma diferença.
-    A saída (print) é o que o GitHub Actions transforma em um Issue.
-    """
+
+# --- FUNÇÃO 1: EXTRAÇÃO DO HABBO RP ---
+def get_habbo_users_with_shifts(driver):
+    """Faz login no Habbo RP e extrai a lista de nicks e turnos."""
+    users_habbo = {} 
+    
     try:
-        # 1. Faz a requisição HTTP para a página
-        response = requests.get(TARGET_URL)
-        response.raise_for_status()  # Gera exceção para erros 4xx/5xx
+        driver.get(URL_HABBO)
+        wait = WebDriverWait(driver, 10)
 
-        # 2. Analisa o conteúdo HTML da página
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # 3. Procura pela string de erro no texto completo da página
-        page_text = soup.get_text().strip()
-
-        if STRING_DE_ERRO in page_text:
-            # STATUS ATUAL: Encontrou a string de erro (o usuário está INATIVO/AUSENTE)
-            
-            # Se o usuário *deveria* estar ativo, mas está inativo/ausente, disparamos a notificação.
-            # *******************************************************************
-            # Lógica de notificação: Se ele está INATIVO, gere um Issue.
-            # *******************************************************************
-            
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
-            
-            # ESTA SAÍDA SERÁ CAPTURADA PELO GITHUB ACTIONS!
-            print(f"[{current_time}] O monitoramento de '{USER_ID}' encontrou a string de erro.")
-            print("--- Detalhes da Notificação ---")
-            print(f"Status Atual: INATIVO/AUSENTE")
-            print(f"String Encontrada: '{STRING_DE_ERRO}'")
-            print(f"URL: {TARGET_URL}")
-            print("\n**Ação Requerida:** Verifique a página e o estado do usuário.")
-            
-            # Para garantir que o GitHub Actions capture a saída, podemos usar sys.exit(1)
-            # MAS, como estamos usando 'continue-on-error: true' no YAML, basta o 'print'
-            # para alimentar o Issue, e o código pode terminar normalmente.
+        # ***** INSPECIONE AQUI: LOGIN HABBO RP *****
+        # Altere o (By.NAME, 'user') e (By.NAME, 'pass') se necessário
+        wait.until(EC.presence_of_element_located((By.NAME, 'user'))).send_keys(HABBO_USER)
+        driver.find_element(By.NAME, 'pass').send_keys(HABBO_PASSWORD)
+        driver.find_element(By.CLASS_NAME, 'btn-login').click()
         
-        else:
-            # STATUS ATUAL: Não encontrou a string de erro (o usuário parece estar ATIVO/PRESENTE)
+        # Espera a página de corporação carregar (ajuste o seletor de espera)
+        wait.until(EC.url_to_be(URL_HABBO))
+        # ***** FIM DA INSPEÇÃO HABBO RP *****
+        
+        # Web Scraping Pós-Login
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+        # ***** PERSONALIZAR AQUI (EXTRAÇÃO NICK/TURNO HABBO RP) *****
+        # Lógica para extrair nick e turno da página logada.
+        # Exemplo:
+        ranking_rows = soup.find_all('div', class_='user-ranking-row') 
+        for row in ranking_rows:
+            nick = row.find('a', class_='user-nick').get_text().strip()
+            shifts = row.find('span', class_='shift-info').get_text().strip()
+            users_habbo[nick] = shifts
+        # ***** FIM DA PERSONALIZAÇÃO *****
+        
+        return users_habbo
+
+    except Exception as e:
+        print(f"ERRO ao extrair Habbo RP (Login/Scraping): {e}", file=sys.stderr)
+        return {} 
+
+
+# --- FUNÇÃO 2: EXTRAÇÃO DO DASHBOARD VERCEL ---
+def get_dashboard_users(driver):
+    """Faz login no Dashboard Vercel e extrai a lista de nicks."""
+    users_dashboard = set() 
+    
+    try:
+        driver.get(URL_DASHBOARD_LOGIN)
+        wait = WebDriverWait(driver, 10)
+
+        # ***** INSPECIONE AQUI: LOGIN VERCEL DASHBOARD *****
+        # Altere o (By.ID, 'email') e (By.ID, 'password') se necessário
+        wait.until(EC.presence_of_element_located((By.ID, 'email'))).send_keys(VERCEL_USER)
+        driver.find_element(By.ID, 'password').send_keys(VERCEL_PASSWORD)
+        driver.find_element(By.XPATH, '//button[text()="Logar"]').click() # Exemplo para botão com texto "Logar"
+        
+        # Espera a navegação para o dashboard
+        wait.until(EC.url_to_be(URL_DASHBOARD_DATA))
+        # ***** FIM DA INSPEÇÃO VERCEL DASHBOARD *****
+
+        # Web Scraping Pós-Login (Dashboard)
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+        # ***** PERSONALIZAR AQUI (EXTRAÇÃO NICK VERCEL) *****
+        # Lógica para extrair a lista de nicks da página logada.
+        # Exemplo:
+        nick_elements = soup.find_all('td', class_='employee-name')
+        for element in nick_elements:
+             users_dashboard.add(element.get_text().strip())
+        # ***** FIM DA PERSONALIZAÇÃO *****
+        
+        return users_dashboard
+
+    except Exception as e:
+        print(f"ERRO ao extrair Dashboard Vercel (Login/Scraping): {e}", file=sys.stderr)
+        return set()
+
+
+# --- FUNÇÃO PRINCIPAL (CRUZAMENTO DE DADOS) ---
+def check_for_new_users():
+    """Compara as listas e imprime Issue se encontrar um novato."""
+    
+    # 1. Verifica se as credenciais estão disponíveis
+    if not all([HABBO_USER, HABBO_PASSWORD, VERCEL_USER, VERCEL_PASSWORD]):
+        print("ERRO CRÍTICO: Credenciais incompletas. Verifique os GitHub Secrets.", file=sys.stderr)
+        sys.exit(1)
+        
+    driver = setup_driver()
+    
+    try:
+        habbo_users = get_habbo_users_with_shifts(driver)
+        dashboard_users = get_dashboard_users(driver) 
+    finally:
+        driver.quit() # Garante que o driver feche
+
+    # 2. Identificar usuários no Habbo RP, mas NÃO no Dashboard
+    novatos = {}
+    for nick, shifts in habbo_users.items():
+        if nick not in dashboard_users:
+            novatos[nick] = shifts
             
-            # Se o usuário está na situação ESPERADA (ativo), o script não imprime nada.
-            # O GitHub Actions captura uma saída VAZIA e NÃO cria um Issue.
-            pass
-            # print(f"[{USER_ID}] Status OK. Nenhuma string de erro encontrada.") # (Comentado, não imprima se estiver OK)
-
-    except requests.exceptions.RequestException as e:
-        # Captura erros de rede ou 4xx/5xx HTTP
+    if novatos:
+        # Imprime a notificação para o Issue
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
-        print(f"[{current_time}] ERRO DE CONEXÃO ou HTTP ao verificar {USER_ID}: {e}")
-        print("--- Detalhes ---")
-        print(f"URL: {TARGET_URL}")
-
+        
+        print(f"[{current_time}] ⚠️ NOVATOS ENCONTRADOS! Usuários no Habbo RP, mas fora do Dashboard.")
+        print("Detalhes:")
+        
+        for nick, shifts in novatos.items():
+            print(f"- **{nick}** (Turnos: {shifts})")
+            
+        print("\n**Ação Requerida:** Cadastrar estes usuários no sistema de funcionários.")
 
 if __name__ == "__main__":
-    check_user_status()
+    check_for_new_users()
